@@ -91,11 +91,6 @@ class PeepholeOptimizer:
     
     def _nop_eliminate(self):
         """Remove NOP instructions."""
-        new_bc = []
-        for b in self.bc:
-            # Keep non-NOP bytes and NOP opcodes that aren't standalone
-            new_bc.append(b)
-        
         # Scan for standalone NOPs (0x01 at positions that form valid instructions)
         # This is tricky without full disassembly, so we just look for obvious sequences
         result = []
@@ -183,21 +178,61 @@ class PeepholeOptimizer:
         self.bc = result
     
     def _dead_code(self):
-        """Remove stores to registers that are never read."""
-        # Simplified: track which registers are read after being written
-        # For full implementation, would need data flow analysis
-        pass
+        """Remove unreachable code after the last HALT instruction."""
+        # Walk bytecode instruction-by-instruction, find last HALT, truncate after it.
+        last_halt_end = -1
+        i = 0
+        while i < len(self.bc):
+            op = self.bc[i]
+            if op == 0x00:  # HALT (Format A, 1 byte)
+                last_halt_end = i + 1
+            # Skip instruction by format size
+            if op <= 0x07: i += 1      # Format A
+            elif op <= 0x17: i += 2    # Format B
+            elif op <= 0x1F: i += 3    # Format C
+            elif op <= 0x4F: i += 4    # Format E
+            else: i += 1
+
+        if last_halt_end >= 0 and last_halt_end < len(self.bc):
+            self.bc = self.bc[:last_halt_end]
+            self.rules_applied.append("dead_code")
     
     def _peephole(self):
-        """General peephole patterns."""
+        """General peephole patterns.
+
+        Detects ADD Rn,Rn,Rn (doubling via self-addition) and replaces with
+        SHL Rn,Rn,1 (shift-left by 1, strength reduction).  SHL opcode = 0x24.
+        """
         result = []
         i = 0
         while i < len(self.bc):
-            # Pattern: MOVI R0, 0 → could use XOR R0, R0, R0 (same size, no immediate)
-            # Pattern: ADD R0, R0, R0 → SHL R0, R0, 1 (if SHL available)
-            result.append(self.bc[i])
-            i += 1
-        
+            op = self.bc[i]
+            # Pattern: ADD dst, src1, src2 where all three registers are the same
+            # ADD is opcode 0x20, Format E (4 bytes): [0x20, dst, src1, src2]
+            if (op == 0x20 and i + 3 < len(self.bc) and
+                    self.bc[i+1] == self.bc[i+2] == self.bc[i+3]):
+                reg = self.bc[i+1]
+                result.extend([0x24, reg, reg, 1])  # SHL reg, reg, 1
+                self.rules_applied.append(
+                    f"peephole: ADD R{reg},R{reg},R{reg} → SHL R{reg},R{reg},1")
+                i += 4
+            else:
+                # Copy instruction bytes respecting format sizes
+                if op <= 0x07:      # Format A – 1 byte
+                    result.append(self.bc[i])
+                    i += 1
+                elif op <= 0x17:    # Format B – 2 bytes
+                    result.extend(self.bc[i:i+2])
+                    i += 2
+                elif op <= 0x1F:    # Format C – 3 bytes
+                    result.extend(self.bc[i:i+3])
+                    i += 3
+                elif op <= 0x4F:    # Format E – 4 bytes
+                    result.extend(self.bc[i:i+4])
+                    i += 4
+                else:
+                    result.append(self.bc[i])
+                    i += 1
         self.bc = result
     
     def get_bytecode(self) -> List[int]:
